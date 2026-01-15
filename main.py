@@ -1047,11 +1047,86 @@ def run_prediction(profile: StudentProfile, include_explanations: bool = True, d
     return result
 
 
+# ---------------- Standard Cosine Similarity (No Weights) ----------------
+def standard_cosine_similarity_vectorized(user_vec: np.ndarray, job_matrix: np.ndarray) -> np.ndarray:
+    """Standard cosine similarity WITHOUT weights - for comparison"""
+    sims = cosine_similarity([user_vec], job_matrix)[0]
+    return sims
+
+def run_prediction_standard(profile: StudentProfile, include_explanations: bool = True) -> Dict:
+    """Run prediction using STANDARD cosine similarity (no weights, no bonuses)"""
+    # Build input
+    input_df = make_dataframe(profile)
+    processed_input = preprocessor.transform(input_df)
+
+    feature_names = preprocessor.get_feature_names_out()
+    user_vec = processed_input[0] if processed_input.ndim > 1 else processed_input
+    job_matrix = job_profiles.values
+    job_roles = list(job_profiles.index)
+
+    # 1) Standard cosine similarity (NO WEIGHTS)
+    raw_scores = standard_cosine_similarity_vectorized(user_vec, job_matrix)
+
+    # 2) Adjust scores with gaps (now integers)
+    adjusted_scores = adjust_scores_with_gaps(raw_scores, min_gap=3)
+
+    # 3) Package results
+    job_records = []
+    for i, jr in enumerate(job_roles):
+        job_records.append({
+            "job_role": jr,
+            "category": ROLE_TO_CATEGORY.get(jr, "Other"),
+            "match_score": f"{adjusted_scores[i]}%",
+            "_index": i
+        })
+
+    # Sort by score
+    job_records = sorted(job_records, key=lambda x: int(x["match_score"].strip('%')), reverse=True)
+
+    # Take top 3
+    job_records = job_records[:3]
+
+    result = {
+        "job_matches": job_records,
+        "algorithm": "Standard Cosine Similarity (Unweighted)",
+        "note": "This uses standard cosine similarity without feature weighting or career interest bonuses"
+    }
+
+    if include_explanations:
+        explanations = []
+        for job_rec in job_records:
+            job_index = job_rec["_index"]
+            job_vec = job_matrix[job_index]
+            match_score = int(job_rec["match_score"].strip('%'))
+
+            explanation = explain_recommendation(
+                profile,
+                job_rec["job_role"],
+                match_score,
+                user_vec,
+                job_vec,
+                feature_names
+            )
+            explanations.append(explanation)
+            del job_rec["_index"]
+
+        result["detailed_explanations"] = explanations
+        validation = validate_recommendation_quality(job_records, profile, explanations)
+        result["validation"] = validation
+    else:
+        for job_rec in job_records:
+            if "_index" in job_rec:
+                del job_rec["_index"]
+
+    return result
+
+
 # ---------------- Endpoints ----------------
 @app.post("/predict")
 def predict(profile: StudentProfile, diversity_mode: str = "auto"):
     """
     Generate career recommendations with detailed explanations and validation.
+    Uses WEIGHTED cosine similarity with research-backed feature importance.
 
     Parameters:
     - profile: Student profile data
@@ -1060,6 +1135,19 @@ def predict(profile: StudentProfile, diversity_mode: str = "auto"):
     Returns job matches, contribution analysis, and quality metrics.
     """
     return {"recommendations": run_prediction(profile, include_explanations=True, diversity_mode=diversity_mode)}
+
+@app.post("/predict-standard")
+def predict_standard(profile: StudentProfile):
+    """
+    Generate career recommendations using STANDARD cosine similarity (NO WEIGHTS).
+    Useful for comparison with weighted approach.
+
+    Parameters:
+    - profile: Student profile data
+
+    Returns job matches using unweighted cosine similarity.
+    """
+    return {"recommendations": run_prediction_standard(profile, include_explanations=True)}
 
 @app.get("/weights")
 def get_weight_metadata():
